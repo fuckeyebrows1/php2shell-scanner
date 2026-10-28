@@ -14,12 +14,18 @@ permissions:
 jobs:
   smoke:
     name: Verdict smoke tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is the declared floor, 3.13 matches the Docker image.
-        python-version: ["3.9", "3.13"]
+        include:
+          # Declared floor. setup-python ships no 3.9 build for Ubuntu 26.04
+          # (what ubuntu-latest now resolves to), so pin an image that has one.
+          - python-version: "3.9"
+            os: ubuntu-24.04
+          # Matches the interpreter in the Docker image.
+          - python-version: "3.13"
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
