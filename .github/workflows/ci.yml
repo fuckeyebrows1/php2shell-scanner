@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Verdict smoke tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the declared floor, 3.13 matches the Docker image.
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run verdict smoke tests
+        run: python tests/smoke_test.py
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t php2shell-scanner .
+
+      - name: Check entrypoint
+        run: docker run --rm php2shell-scanner --help
+
+      - name: Scan a local mock target from inside the image
+        run: |
+          set -euo pipefail
+          python3 tests/mock_server.py 18080 vuln &
+          mock_pid=$!
+          trap 'kill "$mock_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 50); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/; then
+              break
+            fi
+            sleep 0.2
+          done
+          if ! curl -fsS -o /dev/null http://127.0.0.1:18080/; then
+            echo "mock target never became ready"
+            exit 1
+          fi
+
+          set +e
+          docker run --rm --network host php2shell-scanner \
+            -u http://127.0.0.1:18080 -q --no-color
+          status=$?
+          set -e
+
+          if [ "$status" -ne 1 ]; then
+            echo "expected exit code 1 for a vulnerable target, got $status"
+            exit 1
+          fi
+          echo "image correctly flagged the vulnerable mock target"

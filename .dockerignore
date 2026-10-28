@@ -1,0 +1,8 @@
+.git
+.github
+.venv
+dev
+tests
+__pycache__
+*.py[cod]
+.ruff_cache
