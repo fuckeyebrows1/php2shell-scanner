@@ -4,13 +4,16 @@
 Usage: python3 tests/mock_server.py <port> <mode> [php_version]
 
 Modes:
-  clean -> control and probe requests are handled normally
-  vuln  -> probes answer with the in-band PHP memory-exhaustion fatal error
-  fpm   -> probes kill the worker, so the fronting server answers 502
+  clean     -> control and probe requests are handled normally
+  vuln      -> probes answer with the in-band PHP memory-exhaustion fatal error
+  fpm       -> probes kill the worker, so the fronting server answers 502
+  blackhole -> the body is read but no response is ever sent, so the client
+               hits its read timeout
 
 The advertised X-Powered-By version defaults to 8.4.27 (patched).
 """
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
@@ -43,6 +46,11 @@ class Handler(BaseHTTPRequestHandler):
             remaining -= len(chunk)
 
         probe = length > 1000
+        if probe and MODE == "blackhole":
+            # Accept and consume the probe, then never answer: the scanner has
+            # to report a timeout rather than a crash.
+            time.sleep(120)
+            return
         if probe and MODE == "vuln":
             return self._respond(500, FATAL)
         if probe and MODE == "fpm":

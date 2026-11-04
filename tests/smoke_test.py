@@ -11,6 +11,8 @@ Covers the detection and reporting paths CI must keep working:
   * duplicate host lines are scanned once
   * a custom --path is preserved
   * --all-results saves non-vulnerable targets
+  * unreachable host                   -> ERROR, never VULNERABLE
+  * probe timeout                      -> INCONCLUSIVE, never VULNERABLE
 
 Stdlib only. Talks to loopback exclusively.
 """
@@ -88,7 +90,7 @@ class MockTarget:
         return False
 
 
-def run_scan(args, workdir):
+def run_scan(args, workdir, scan_timeout=20):
     """Run the scanner, always writing results for every target."""
     global _counter
     _counter += 1
@@ -103,7 +105,7 @@ def run_scan(args, workdir):
         "--no-color",
         "-q",
         "--timeout",
-        "20",
+        str(scan_timeout),
     ]
     proc = subprocess.run(command, capture_output=True, text=True, timeout=300)
     payload = None
@@ -207,6 +209,43 @@ def test_custom_path(workdir):
           request_line)
 
 
+def test_unreachable_host(workdir):
+    print("unreachable host")
+    # A bound-then-closed port: nothing is listening, so the control request
+    # fails to connect and the target must not be reported as vulnerable.
+    port = free_port()
+    proc, payload = run_scan(["-u", "http://127.0.0.1:%d" % port], workdir)
+    result = only_result(payload)
+    check("vulnerable is unknown, not true", result["vulnerable"] is None,
+          "vulnerable=%r" % (result["vulnerable"],))
+    check("verdict is not VULNERABLE", result["verdict"] != "VULNERABLE",
+          result["verdict"])
+    check("verdict is ERROR", result["verdict"] == "ERROR", result["verdict"])
+    check("reason names the control request",
+          "control request failed" in (result["reason"] or ""), result["reason"])
+    check("no response evidence is invented", result["response"] is None,
+          repr(result["response"])[:80])
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
+
+
+def test_probe_timeout(workdir):
+    print("probe timeout")
+    with MockTarget("blackhole") as mock:
+        proc, payload = run_scan(["-u", mock.url], workdir, scan_timeout=2)
+    result = only_result(payload)
+    check("vulnerable is unknown, not true", result["vulnerable"] is None,
+          "vulnerable=%r" % (result["vulnerable"],))
+    check("verdict is not VULNERABLE", result["verdict"] != "VULNERABLE",
+          result["verdict"])
+    check("verdict is INCONCLUSIVE", result["verdict"] == "INCONCLUSIVE",
+          result["verdict"])
+    check("reason says the probe failed",
+          "probe 1 failed before a response was read" in (result["reason"] or ""),
+          result["reason"])
+    check("error is recorded", bool(result["error"]), repr(result["error"]))
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
+
+
 def main():
     if not SCANNER.exists():
         raise SystemExit("scanner.py not found at %s" % SCANNER)
@@ -221,6 +260,8 @@ def main():
             test_legacy_version(workdir)
             test_deduplication(workdir)
             test_custom_path(workdir)
+            test_unreachable_host(workdir)
+            test_probe_timeout(workdir)
         except Exception as exc:  # report harness failures as failures, not crashes
             print("  FAIL harness error: %r" % (exc,))
             FAILURES.append("harness")
