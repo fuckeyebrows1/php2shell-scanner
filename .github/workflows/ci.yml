@@ -84,3 +84,53 @@ jobs:
             exit 1
           fi
           echo "image correctly flagged the vulnerable mock target"
+
+  # The mock target cannot reproduce a real PHP build, so the README's
+  # documented memory_limit false positive is only observable against an
+  # actual patched server: this job scans one and requires a clean verdict.
+  real-php:
+    name: Patched PHP false-positive check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Pinned to the release the README names as patched, and mounted with an
+      # explicit ini so expose_php and memory_limit do not depend on the image.
+      - name: Start patched PHP 8.4.27
+        run: |
+          docker run --detach --name php-patched --publish 18090:80 \
+            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
+            --volume "$PWD/tests/real_php/ci.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            php:8.4.27-apache
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18090/index.php; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PHP target never became ready"
+          docker logs php-patched
+          exit 1
+
+      - name: Scan the patched target
+        run: python tests/real_php_check.py http://127.0.0.1:18090/index.php --body php2shell-ci
+
+      - name: Show container logs
+        if: failure()
+        run: docker logs php-patched || true
+
+      - name: Stop the container
+        if: always()
+        run: docker rm --force php-patched || true
