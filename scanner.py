@@ -918,7 +918,25 @@ def check_url(
             )
             break
 
+        by_version = version_verdict(powered_by)
         detected_sapi, signal = crash_signal(control, probe, sapi)
+        # A patched build answers a probe that exceeds memory_limit with the same
+        # empty HTTP 500 a vulnerable one produces, so that response is ambiguous
+        # on its own. When the target names a patched release, the release wins
+        # (see README limitations). In-band fatal errors and worker failures keep
+        # counting: they are direct evidence of the vulnerable parser.
+        ambiguous_500 = (
+            probe.status_code == 500 and bool(control.body) and not probe.body
+        )
+        if signal and by_version == "FIXED" and ambiguous_500:
+            result["vulnerable"] = False
+            result["verdict"] = "FIXED"
+            result["reason"] = (
+                f"probe {index} ({size_mib} MiB, {parts} parts) produced "
+                f"{signal}, but X-Powered-By reports a patched release: "
+                + powered_by
+            )
+            return result
         if signal:
             result["vulnerable"] = True
             result["verdict"] = "VULNERABLE"
@@ -929,7 +947,7 @@ def check_url(
             )
             return result
 
-        if version_verdict(powered_by) == "FIXED":
+        if by_version == "FIXED":
             result["vulnerable"] = False
             result["verdict"] = "FIXED"
             result["reason"] = (

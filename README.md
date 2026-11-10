@@ -8,6 +8,8 @@ The scanner sends a minimal multipart control request followed by up to three cr
 
 A target is reported vulnerable when the probe produces a PHP memory-exhaustion error, a differential empty HTTP 500, a PHP-FPM worker failure, or an advertised PHP version known to be unpatched. Initial 5xx responses, common request-rejection statuses, and nonempty HTTP 500 responses without the PHP fatal-error signature are not treated as crash signals.
 
+A differential empty HTTP 500 is only treated as a crash signal when the target does not advertise a patched release. A patched build answers a probe that exceeds its `memory_limit` with the same response, so that one ambiguous case is resolved in favour of the advertised version.
+
 The scanner tests `/index.php` by default. A path supplied in the URL is preserved, and `--path` or `--path-file` can test custom paths. phpMyAdmin targets are automatically retested at `/show_config_errors.php`. Redirects are not followed unless `--follow-redirects` is set.
 
 ### SAPI Modes
@@ -122,8 +124,8 @@ Results are printed to the terminal. When using `-o`, vulnerable hosts are saved
 
 ## Limitations
 
-On specific PHP configurations, the scanner may report a false positive when its multipart probe exceeds PHP's `memory_limit`. Patched and vulnerable versions can then return the same empty HTTP 500 response.
+On specific PHP configurations, a multipart probe that exceeds PHP's `memory_limit` makes a patched build answer with the same empty HTTP 500 a vulnerable one does. This was reproduced on patched PHP 8.4.27 with `memory_limit` values from **2M to 32M**, and on PHP 8.3.36 at **128M** when `max_multipart_body_parts` is set to **2785 or higher**. The exact threshold may vary between builds.
 
-This was reproduced on patched PHP 8.4.27 with `memory_limit` values from **2M to 32M**, and on PHP 8.3.36 at **128M** when `max_multipart_body_parts` is set to **2785 or higher**. The exact threshold may vary between builds.
+Because that response is ambiguous, an empty HTTP 500 is not counted as a crash signal when the target advertises a patched release: the target is reported `FIXED` and the overridden signal is recorded in the reason. In-band PHP fatal errors and FPM worker failures still count, since they are direct evidence of the vulnerable parser rather than a bodyless 500.
 
-When PHP does not disclose its version, the scanner cannot distinguish this safe post-patch OOM from the vulnerable pre-patch behavior. Results should therefore be verified against the installed PHP version and any vendor backports
+When PHP does not disclose its version, the scanner cannot distinguish this safe post-patch OOM from the vulnerable pre-patch behavior. Results should therefore be verified against the installed PHP version and any vendor backports.

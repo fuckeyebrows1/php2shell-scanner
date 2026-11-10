@@ -127,10 +127,39 @@ jobs:
       - name: Scan the patched target
         run: python tests/real_php_check.py http://127.0.0.1:18090/index.php --body php2shell-ci
 
+      # The same build at a memory_limit the README names as a false positive.
+      # The probe now exhausts memory and comes back as an empty HTTP 500, which
+      # must not be reported as vulnerable while the release stays patched.
+      - name: Start patched PHP 8.4.27 with a small memory_limit
+        run: |
+          docker run --detach --name php-lowmem --publish 18091:80 \
+            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
+            --volume "$PWD/tests/real_php/lowmem.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            php:8.4.27-apache
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18091/index.php; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "low-memory PHP target never became ready"
+          docker logs php-lowmem
+          exit 1
+
+      - name: Scan the low-memory target
+        run: >-
+          python tests/real_php_check.py http://127.0.0.1:18091/index.php
+          --body php2shell-ci --expect-signal
+
       - name: Show container logs
         if: failure()
-        run: docker logs php-patched || true
+        run: |
+          docker logs php-patched || true
+          docker logs php-lowmem || true
 
-      - name: Stop the container
+      - name: Stop the containers
         if: always()
-        run: docker rm --force php-patched || true
+        run: |
+          docker rm --force php-patched || true
+          docker rm --force php-lowmem || true

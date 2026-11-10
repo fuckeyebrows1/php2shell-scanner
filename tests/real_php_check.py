@@ -65,6 +65,14 @@ def main():
         default="",
         help="marker the target must echo back, proving it answered",
     )
+    parser.add_argument(
+        "--expect-signal",
+        action="store_true",
+        help=(
+            "require that an ambiguous crash signal was produced and overridden "
+            "by the patched release; used for the low memory_limit target"
+        ),
+    )
     args = parser.parse_args()
 
     if not SCANNER.exists():
@@ -106,6 +114,14 @@ def main():
         check(
             "target echoed %r" % args.body,
             args.body in (result.get("response") or ""),
+        )
+    if args.expect_signal:
+        reason = result.get("reason") or ""
+        check(
+            "an ambiguous crash signal was overridden",
+            "produced" in reason
+            and "but X-Powered-By reports a patched release" in reason,
+            reason,
         )
 
     match = VERSION.search(result.get("powered_by") or "")

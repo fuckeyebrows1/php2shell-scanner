@@ -13,6 +13,8 @@ Covers the detection and reporting paths CI must keep working:
   * --all-results saves non-vulnerable targets
   * unreachable host                   -> ERROR, never VULNERABLE
   * probe timeout                      -> INCONCLUSIVE, never VULNERABLE
+  * patched build + empty HTTP 500     -> FIXED (documented false positive)
+  * unpatched build + empty HTTP 500   -> VULNERABLE
 
 Stdlib only. Talks to loopback exclusively.
 """
@@ -246,6 +248,33 @@ def test_probe_timeout(workdir):
     check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
 
 
+def test_patched_empty_500(workdir):
+    print("patched build answers the probe with an empty 500")
+    with MockTarget("oom500", "8.4.27") as mock:
+        proc, payload = run_scan(["-u", mock.url], workdir)
+    result = only_result(payload)
+    check("not flagged vulnerable", result["vulnerable"] is False,
+          repr(result["vulnerable"]))
+    check("verdict is FIXED", result["verdict"] == "FIXED", result["verdict"])
+    check(
+        "reason records the overridden signal",
+        "but X-Powered-By reports a patched release" in (result["reason"] or ""),
+        result["reason"],
+    )
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
+
+
+def test_unpatched_empty_500(workdir):
+    print("unpatched build answers the probe with an empty 500")
+    with MockTarget("oom500", "8.4.26") as mock:
+        proc, payload = run_scan(["-u", mock.url], workdir)
+    result = only_result(payload)
+    check("verdict is VULNERABLE", result["verdict"] == "VULNERABLE",
+          result["verdict"])
+    check("vulnerable flag is true", result["vulnerable"] is True)
+    check("exit code is 1", proc.returncode == 1, "got %d" % proc.returncode)
+
+
 def main():
     if not SCANNER.exists():
         raise SystemExit("scanner.py not found at %s" % SCANNER)
@@ -262,6 +291,8 @@ def main():
             test_custom_path(workdir)
             test_unreachable_host(workdir)
             test_probe_timeout(workdir)
+            test_patched_empty_500(workdir)
+            test_unpatched_empty_500(workdir)
         except Exception as exc:  # report harness failures as failures, not crashes
             print("  FAIL harness error: %r" % (exc,))
             FAILURES.append("harness")

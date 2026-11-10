@@ -9,6 +9,8 @@ Modes:
   fpm       -> probes kill the worker, so the fronting server answers 502
   blackhole -> the body is read but no response is ever sent, so the client
                hits its read timeout
+  oom500    -> probes answer with an empty HTTP 500, the response a patched
+               build gives when the probe exceeds memory_limit
 
 The advertised X-Powered-By version defaults to 8.4.27 (patched).
 """
@@ -51,6 +53,10 @@ class Handler(BaseHTTPRequestHandler):
             # to report a timeout rather than a crash.
             time.sleep(120)
             return
+        if probe and MODE == "oom500":
+            # The ambiguous response: patched and vulnerable builds both produce
+            # it when the probe runs out of memory and display_errors is off.
+            return self._respond(500, b"")
         if probe and MODE == "vuln":
             return self._respond(500, FATAL)
         if probe and MODE == "fpm":
