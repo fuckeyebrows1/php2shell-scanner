@@ -147,10 +147,12 @@ jobs:
           docker logs php-lowmem
           exit 1
 
+      # The probe response here is the empty 500 by design, so no --body marker:
+      # the overridden signal is what proves a real PHP answered the probe.
       - name: Scan the low-memory target
         run: >-
           python tests/real_php_check.py http://127.0.0.1:18091/index.php
-          --body php2shell-ci --expect-signal
+          --expect-signal
 
       - name: Show container logs
         if: failure()

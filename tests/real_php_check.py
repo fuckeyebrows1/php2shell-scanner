@@ -63,7 +63,10 @@ def main():
     parser.add_argument(
         "--body",
         default="",
-        help="marker the target must echo back, proving it answered",
+        help=(
+            "marker the target must echo in the recorded response; only usable "
+            "when that response is expected to have a body"
+        ),
     )
     parser.add_argument(
         "--expect-signal",
@@ -99,10 +102,14 @@ def main():
     )
     check("verdict is FIXED", result["verdict"] == "FIXED", result["verdict"])
 
+    # result["status_code"] and result["response"] carry the last request sent,
+    # which is the probe. On the low-memory target that response is the empty
+    # 500 by design, so the control request is what proves the server is healthy.
+    control = result.get("control") or {}
     check(
         "control request returned HTTP 200",
-        result.get("status_code") == 200,
-        repr(result.get("status_code")),
+        control.get("status_code") == 200,
+        repr(control.get("status_code")),
     )
     probes = result.get("probes") or []
     check(
