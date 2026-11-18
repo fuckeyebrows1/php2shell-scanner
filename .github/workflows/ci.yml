@@ -91,7 +91,7 @@ jobs:
   # documented memory_limit false positive is only observable against an
   # actual patched server: this job scans one and requires a clean verdict.
   real-php:
-    name: Patched PHP false-positive check
+    name: Real PHP target checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -133,6 +133,43 @@ jobs:
         run: >-
           python tests/real_php_check.py http://127.0.0.1:18093/index.php
           --expect-vulnerable
+
+      # PHP-FPM keeps the workers in a separate process from the web server, so
+      # an unpatched build that loses a worker mid-probe makes nginx answer 502.
+      # mod_php cannot show this: there the worker is the request handler, which
+      # is why the step above only ever proved the in-band exhaustion path. The
+      # target hides its release, so the version rule cannot decide the verdict
+      # and VULNERABLE can only come from the dead worker.
+      - name: Start unpatched PHP-FPM 8.4.26 behind nginx
+        run: |
+          set -euo pipefail
+          docker network create php2shell-ci
+
+          docker run --detach --name php-fpm-unpatched --network php2shell-ci \
+            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
+            --volume "$PWD/tests/real_php/unpatched_fpm.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            php:8.4.26-fpm
+
+          docker run --detach --name nginx-unpatched --network php2shell-ci \
+            --publish 18094:80 \
+            --volume "$PWD/tests/real_php/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:alpine
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18094/index.php; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "unpatched PHP-FPM target never became ready"
+          docker logs php-fpm-unpatched
+          docker logs nginx-unpatched
+          exit 1
+
+      - name: Scan the unpatched PHP-FPM target
+        run: >-
+          python tests/real_php_check.py http://127.0.0.1:18094/index.php
+          --expect-worker-death
 
       # Pinned to the release the README names as patched, and mounted with an
       # explicit ini so expose_php and memory_limit do not depend on the image.
@@ -215,9 +252,15 @@ jobs:
           docker logs php-lowmem || true
           docker logs php-fatal || true
           docker logs php-unpatched || true
+          docker logs nginx-unpatched || true
+          docker logs php-fpm-unpatched || true
           echo "--- unpatched worker exits ---"
           docker logs php-unpatched 2>&1 \
             | grep -iE 'segmentation|child pid|signal|memory' | tail -20 || true
+          echo "--- unpatched PHP-FPM worker exits ---"
+          docker logs php-fpm-unpatched 2>&1 \
+            | grep -iE 'segmentation|exited on signal|child pid|memory' | tail -20 \
+            || true
 
       - name: Stop the containers
         if: always()
@@ -226,3 +269,6 @@ jobs:
           docker rm --force php-lowmem || true
           docker rm --force php-fatal || true
           docker rm --force php-unpatched || true
+          docker rm --force nginx-unpatched || true
+          docker rm --force php-fpm-unpatched || true
+          docker network rm php2shell-ci || true
