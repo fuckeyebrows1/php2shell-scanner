@@ -209,7 +209,10 @@ jobs:
             exit 1
           fi
           grep -E 'exited on signal|segmentation fault|Fatal error' \
-            "$RUNNER_TEMP/fpm.log" | tail -5
+            "$RUNNER_TEMP/fpm.log" | tail -5 > "$RUNNER_TEMP/death.log"
+          cat "$RUNNER_TEMP/death.log"
+          while IFS= read -r line; do echo "::notice::$line"; done \
+            < "$RUNNER_TEMP/death.log"
 
       # Pinned to the release the README names as patched, and mounted with an
       # explicit ini so expose_php and memory_limit do not depend on the image.

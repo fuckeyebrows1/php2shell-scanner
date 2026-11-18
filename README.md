@@ -8,7 +8,7 @@ The scanner sends a minimal multipart control request followed by up to three cr
 
 A probe response is classified by what it proves:
 
-- A **PHP-FPM worker that dies mid-request** (an FPM 502, 503 or 504, or an empty HTTP 200) is reported vulnerable whatever version is advertised. Memory exhaustion is a fatal error PHP reports and the worker survives it, so a worker that disappears under this probe is the parser corrupting memory.
+- A **PHP-FPM worker that dies mid-request** (an FPM 502, 503 or 504, or an empty HTTP 200) is reported vulnerable whatever version is advertised. An enforced `memory_limit` cannot explain it: that is a fatal error PHP reports and the worker survives it. A worker that disappears under this probe is the parser taking the process down with it, whether by corrupting memory or, as the unpatched `php:8.4.26-fpm` target in CI shows, by allocating until the container's own memory cap kills it.
 - A **memory-exhaustion response** — the in-band `Allowed memory size … exhausted … in Unknown` fatal, or a differential empty HTTP 500 — is ambiguous, because a patched build answers a probe past its `memory_limit` with exactly the same thing. The advertised release decides: patched means `FIXED`, unpatched means `VULNERABLE`, and no advertised release means `INCONCLUSIVE`.
 - An **advertised release known to be unpatched** is reported vulnerable even when no probe crashed.
 
@@ -132,6 +132,6 @@ On specific PHP configurations, a multipart probe that exceeds PHP's `memory_lim
 
 With `display_errors` on, the same patched build serves the in-band `Allowed memory size … exhausted … in Unknown` text instead of an empty body, so that signal is equally ambiguous.
 
-Both memory-exhaustion signals are therefore settled by the advertised release: a patched release reports `FIXED` and records the overridden signal in the reason. FPM worker failures still count on their own, because memory exhaustion never destroys a worker.
+Both memory-exhaustion signals are therefore settled by the advertised release: a patched release reports `FIXED` and records the overridden signal in the reason. FPM worker failures still count on their own, because an enforced `memory_limit` never destroys a worker.
 
 When PHP does not disclose its version — `expose_php` off, which is common in production — memory-exhaustion evidence cannot be resolved from the outside: the response is identical whether the build is patched and defending at `memory_limit` or unpatched and corrupting the parser. The scanner reports `INCONCLUSIVE` rather than guessing, and the reason records the signal. Confirm the installed release and its `memory_limit` before treating such a target as vulnerable. Worker-death signals are unaffected: they still report vulnerable without an advertised version.
