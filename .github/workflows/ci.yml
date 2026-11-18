@@ -107,6 +107,33 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # The release the fixed-version table calls unpatched, at PHP's default
+      # memory_limit. --expect-vulnerable asserts the verdict comes from a probe
+      # crashing the request handler, not from the advertised version alone, so
+      # this proves the probe rules on a build that actually has the bug. It runs
+      # first: missed detections matter more than an over-eager verdict.
+      - name: Start unpatched PHP 8.4.26
+        run: |
+          docker run --detach --name php-unpatched --publish 18093:80 \
+            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
+            --volume "$PWD/tests/real_php/unpatched.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            php:8.4.26-apache
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18093/index.php; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "unpatched PHP target never became ready"
+          docker logs php-unpatched
+          exit 1
+
+      - name: Scan the unpatched target
+        run: >-
+          python tests/real_php_check.py http://127.0.0.1:18093/index.php
+          --expect-vulnerable
+
       # Pinned to the release the README names as patched, and mounted with an
       # explicit ini so expose_php and memory_limit do not depend on the image.
       - name: Start patched PHP 8.4.27
@@ -180,32 +207,6 @@ jobs:
         run: >-
           python tests/real_php_check.py http://127.0.0.1:18092/index.php
           --expect-fatal
-
-      # The release the fixed-version table calls unpatched, at PHP's default
-      # memory_limit. --expect-vulnerable asserts the verdict comes from a probe
-      # crashing the request handler, not from the advertised version alone, so
-      # this proves the probe rules on a build that actually has the bug.
-      - name: Start unpatched PHP 8.4.26
-        run: |
-          docker run --detach --name php-unpatched --publish 18093:80 \
-            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
-            --volume "$PWD/tests/real_php/unpatched.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
-            php:8.4.26-apache
-
-          for _ in $(seq 1 60); do
-            if curl -fsS -o /dev/null http://127.0.0.1:18093/index.php; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "unpatched PHP target never became ready"
-          docker logs php-unpatched
-          exit 1
-
-      - name: Scan the unpatched target
-        run: >-
-          python tests/real_php_check.py http://127.0.0.1:18093/index.php
-          --expect-vulnerable
 
       - name: Show container logs
         if: failure()
