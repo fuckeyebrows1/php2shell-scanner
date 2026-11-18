@@ -149,14 +149,22 @@ jobs:
       # is why the step above only ever proved the in-band exhaustion path. The
       # target hides its release, so the version rule cannot decide the verdict
       # and VULNERABLE can only come from the dead worker.
+      #
+      # The worker is killed because memory_limit is disabled and the container
+      # cap is small: at 1G of headroom the same probe is answered normally, and
+      # at 128M PHP raises the catchable fatal the mod_php target shows. Only the
+      # uncapped-but-bounded case ends the process, which is what a vulnerable
+      # build does when memory_limit cannot stop the parser's amplification.
       - name: Start unpatched PHP-FPM 8.4.26 behind nginx
         run: |
           set -euo pipefail
           docker network create php2shell-ci
 
           docker run --detach --name php-fpm-unpatched --network php2shell-ci \
+            --memory 160m --memory-swap 160m \
             --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
             --volume "$PWD/tests/real_php/unpatched_fpm.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            --volume "$PWD/tests/real_php/fpm-pool.conf:/usr/local/etc/php-fpm.d/zz-ci.conf:ro" \
             php:8.4.26-fpm
 
           docker run --detach --name nginx-unpatched --network php2shell-ci \
@@ -189,6 +197,19 @@ jobs:
               | while IFS= read -r line; do echo "::error::$line"; done
             exit 1
           fi
+
+      # The verdict says a worker died, so require PHP-FPM itself to have
+      # recorded the death: an nginx 502 alone would also fit a front-end fault.
+      - name: Check PHP-FPM recorded the dead worker
+        run: |
+          docker logs php-fpm-unpatched > "$RUNNER_TEMP/fpm.log" 2>&1 || true
+          if ! grep -qE 'exited on signal|segmentation fault' "$RUNNER_TEMP/fpm.log"; then
+            echo "::error::PHP-FPM never recorded a worker exiting on a signal"
+            tail -30 "$RUNNER_TEMP/fpm.log"
+            exit 1
+          fi
+          grep -E 'exited on signal|segmentation fault|Fatal error' \
+            "$RUNNER_TEMP/fpm.log" | tail -5
 
       # Pinned to the release the README names as patched, and mounted with an
       # explicit ini so expose_php and memory_limit do not depend on the image.
