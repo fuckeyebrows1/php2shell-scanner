@@ -181,12 +181,42 @@ jobs:
           python tests/real_php_check.py http://127.0.0.1:18092/index.php
           --expect-fatal
 
+      # The release the fixed-version table calls unpatched, at PHP's default
+      # memory_limit. --expect-vulnerable asserts the verdict comes from a probe
+      # crashing the request handler, not from the advertised version alone, so
+      # this proves the probe rules on a build that actually has the bug.
+      - name: Start unpatched PHP 8.4.26
+        run: |
+          docker run --detach --name php-unpatched --publish 18093:80 \
+            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
+            --volume "$PWD/tests/real_php/unpatched.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            php:8.4.26-apache
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18093/index.php; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "unpatched PHP target never became ready"
+          docker logs php-unpatched
+          exit 1
+
+      - name: Scan the unpatched target
+        run: >-
+          python tests/real_php_check.py http://127.0.0.1:18093/index.php
+          --expect-vulnerable
+
       - name: Show container logs
         if: failure()
         run: |
           docker logs php-patched || true
           docker logs php-lowmem || true
           docker logs php-fatal || true
+          docker logs php-unpatched || true
+          echo "--- unpatched worker exits ---"
+          docker logs php-unpatched 2>&1 \
+            | grep -iE 'segmentation|child pid|signal|memory' | tail -20 || true
 
       - name: Stop the containers
         if: always()
@@ -194,3 +224,4 @@ jobs:
           docker rm --force php-patched || true
           docker rm --force php-lowmem || true
           docker rm --force php-fatal || true
+          docker rm --force php-unpatched || true

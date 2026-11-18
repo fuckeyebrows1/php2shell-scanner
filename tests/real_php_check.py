@@ -2,6 +2,7 @@
 """Scan a real, patched PHP server and assert it is not reported vulnerable.
 
 Usage: python3 tests/real_php_check.py URL [--body MARKER]
+       python3 tests/real_php_check.py URL --expect-vulnerable
 
 The README documents a false positive on patched PHP when a multipart probe
 exceeds ``memory_limit``: it was reproduced on PHP 8.4.27 at 2M-32M, and on
@@ -57,6 +58,58 @@ def scan(url):
     return proc, payload
 
 
+def check_unpatched(proc, result):
+    """Assert a genuinely unpatched build is flagged by probe evidence.
+
+    The advertised version alone already makes the scanner report VULNERABLE, so
+    a verdict check on its own would pass without the parser ever being
+    exercised. The crash-evidence check is what proves the probe rules still fire
+    against a build that really has the bug rather than only against mocks.
+    """
+    check("exit code is 1", proc.returncode == 1, "got %d" % proc.returncode)
+    check(
+        "target is vulnerable",
+        result["vulnerable"] is True,
+        repr(result["vulnerable"]),
+    )
+    check("verdict is VULNERABLE", result["verdict"] == "VULNERABLE", result["verdict"])
+
+    reason = result.get("reason") or ""
+    check(
+        "a probe crashed the request handler",
+        "crashed the request handler" in reason or "killed the PHP worker" in reason,
+        reason,
+    )
+
+    control = result.get("control") or {}
+    check(
+        "control request returned HTTP 200",
+        control.get("status_code") == 200,
+        repr(control.get("status_code")),
+    )
+
+    match = VERSION.search(result.get("powered_by") or "")
+    if not match:
+        check("server advertises its PHP release", False, repr(result.get("powered_by")))
+    else:
+        version = tuple(int(part) for part in match.groups())
+        fixed = PATCHED_RELEASES.get(version[:2])
+        check(
+            "advertised release is unpatched",
+            fixed is None or version[2] < fixed,
+            "%d.%d.%d is at or above the fixed release; update the image pin"
+            % version,
+        )
+
+    print("")
+    print("reason: %s" % result.get("reason"))
+    if FAILURES:
+        print("FAILED: %d check(s): %s" % (len(FAILURES), ", ".join(FAILURES)))
+        return 1
+    print("Unpatched target correctly reported vulnerable.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", help="URL of the real PHP target")
@@ -85,6 +138,14 @@ def main():
             "target whose display_errors is on"
         ),
     )
+    parser.add_argument(
+        "--expect-vulnerable",
+        action="store_true",
+        help=(
+            "require VULNERABLE from probe crash evidence on an unpatched "
+            "release; used for the php:8.4.26-apache target"
+        ),
+    )
     args = parser.parse_args()
 
     if not SCANNER.exists():
@@ -102,6 +163,9 @@ def main():
     if not results:
         raise SystemExit(1)
     result = results[0]
+
+    if args.expect_vulnerable:
+        return check_unpatched(proc, result)
 
     check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
     check(
