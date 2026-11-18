@@ -58,7 +58,9 @@ jobs:
       - name: Scan a local mock target from inside the image
         run: |
           set -euo pipefail
-          python3 tests/mock_server.py 18080 vuln &
+          # An unpatched release is advertised so the mock's in-band OOM fatal
+          # is corroborated by the version instead of being ambiguous.
+          python3 tests/mock_server.py 18080 vuln 8.4.26 &
           mock_pid=$!
           trap 'kill "$mock_pid" 2>/dev/null || true' EXIT
 
@@ -154,14 +156,41 @@ jobs:
           python tests/real_php_check.py http://127.0.0.1:18091/index.php
           --expect-signal
 
+      # The same build at the same memory_limit, but reporting errors in-band: the
+      # patched build now serves the memory-exhaustion fatal the vulnerable parser
+      # also produces, so the advertised release still has to decide the verdict.
+      - name: Start patched PHP 8.4.27 with in-band error reporting
+        run: |
+          docker run --detach --name php-fatal --publish 18092:80 \
+            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
+            --volume "$PWD/tests/real_php/fatal.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            php:8.4.27-apache
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18092/index.php; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "in-band PHP target never became ready"
+          docker logs php-fatal
+          exit 1
+
+      - name: Scan the in-band target
+        run: >-
+          python tests/real_php_check.py http://127.0.0.1:18092/index.php
+          --expect-fatal
+
       - name: Show container logs
         if: failure()
         run: |
           docker logs php-patched || true
           docker logs php-lowmem || true
+          docker logs php-fatal || true
 
       - name: Stop the containers
         if: always()
         run: |
           docker rm --force php-patched || true
           docker rm --force php-lowmem || true
+          docker rm --force php-fatal || true

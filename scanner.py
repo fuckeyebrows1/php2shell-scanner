@@ -654,56 +654,70 @@ def version_verdict(powered_by: str) -> Optional[str]:
     return "FIXED" if patch >= fixed_patch else "VULNERABLE"
 
 
+MEMORY_EXHAUSTION = "memory"
+WORKER_DEATH = "worker"
+
+
+def memory_fatal(body: bytes) -> bool:
+    return (
+        b"Allowed memory size of " in body
+        and b" bytes exhausted" in body
+        and b"Unknown" in body
+    )
+
+
 def crash_signal(
     control: HTTPResult, probe: HTTPResult, sapi: str
-) -> Tuple[Optional[str], Optional[str]]:
-    if (
-        b"Allowed memory size of " in probe.body
-        and b" bytes exhausted" in probe.body
-        and b"Unknown" in probe.body
-    ):
-        mode = (
-            "PHP-FPM"
-            if sapi == "fpm"
-            else "mod_php"
-            if sapi == "mod_php"
-            else "mod_php/PHP-FPM"
-        )
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Classify a probe response as crash evidence.
+
+    The third element records what the evidence proves. ``MEMORY_EXHAUSTION``
+    is also what a patched build produces once a probe exceeds ``memory_limit``,
+    so it decides a verdict only together with the advertised release.
+    ``WORKER_DEATH`` is not: hitting the limit raises a fatal error PHP reports
+    and leaves the worker running, so a worker that disappears mid-request is
+    the parser corrupting memory.
+    """
+    mode = (
+        "PHP-FPM"
+        if sapi == "fpm"
+        else "mod_php"
+        if sapi == "mod_php"
+        else "mod_php/PHP-FPM"
+    )
+    if memory_fatal(probe.body):
         return (
             mode,
             "in-band PHP fatal error (memory exhausted in Unknown) raised while "
             "parsing the multipart body",
+            MEMORY_EXHAUSTION,
         )
 
     if probe.status_code == 500 and control.body and not probe.body:
-        mode = (
-            "PHP-FPM"
-            if sapi == "fpm"
-            else "mod_php"
-            if sapi == "mod_php"
-            else "mod_php/PHP-FPM"
-        )
         return (
             mode,
             "HTTP 500 with an empty body although the control request produced output",
+            MEMORY_EXHAUSTION,
         )
 
     if sapi == "mod_php":
-        return None, None
+        return None, None, None
 
     if probe.status_code in (502, 503, 504):
         return (
             "PHP-FPM",
             f"HTTP {probe.status_code} from the web server fronting PHP-FPM "
             "(worker died mid-request)",
+            WORKER_DEATH,
         )
     if probe.status_code == 200 and control.body and not probe.body:
         return (
             "PHP-FPM",
             "HTTP 200 with an empty body although the control request produced "
             "output (worker died mid-request)",
+            WORKER_DEATH,
         )
-    return None, None
+    return None, None, None
 
 
 def describe_response(response: HTTPResult) -> str:
@@ -919,16 +933,24 @@ def check_url(
             break
 
         by_version = version_verdict(powered_by)
-        detected_sapi, signal = crash_signal(control, probe, sapi)
-        # A patched build answers a probe that exceeds memory_limit with the same
-        # empty HTTP 500 a vulnerable one produces, so that response is ambiguous
-        # on its own. When the target names a patched release, the release wins
-        # (see README limitations). In-band fatal errors and worker failures keep
-        # counting: they are direct evidence of the vulnerable parser.
-        ambiguous_500 = (
-            probe.status_code == 500 and bool(control.body) and not probe.body
-        )
-        if signal and by_version == "FIXED" and ambiguous_500:
+        detected_sapi, signal, evidence = crash_signal(control, probe, sapi)
+        # Memory exhaustion is ambiguous evidence: a patched build answers a
+        # probe larger than memory_limit with the same in-band fatal error, or
+        # with the same empty HTTP 500 when display_errors is off. The advertised
+        # release settles it, and with no release to go on the probe cannot.
+        # Worker death is not ambiguous: memory_limit raises a fatal error PHP
+        # reports and leaves the worker alive, so a worker that vanishes under
+        # this probe is the parser corrupting memory, whatever version it claims.
+        if signal and evidence == WORKER_DEATH:
+            result["vulnerable"] = True
+            result["verdict"] = "VULNERABLE"
+            result["sapi"] = detected_sapi
+            result["reason"] = (
+                f"probe {index} ({size_mib} MiB, {parts} parts) killed the PHP "
+                f"worker: {signal}"
+            )
+            return result
+        if signal and by_version == "FIXED":
             result["vulnerable"] = False
             result["verdict"] = "FIXED"
             result["reason"] = (
@@ -937,13 +959,28 @@ def check_url(
                 + powered_by
             )
             return result
-        if signal:
+        if signal and by_version == "VULNERABLE":
             result["vulnerable"] = True
             result["verdict"] = "VULNERABLE"
             result["sapi"] = detected_sapi
             result["reason"] = (
                 f"probe {index} ({size_mib} MiB, {parts} parts) crashed the "
-                f"request handler: {signal}"
+                f"request handler: {signal}, and X-Powered-By reports an "
+                "unpatched release: " + powered_by
+            )
+            return result
+        if signal:
+            result["vulnerable"] = None
+            result["verdict"] = "INCONCLUSIVE"
+            result["error"] = (
+                "memory exhaustion on a target that advertises no PHP version"
+            )
+            result["reason"] = (
+                f"probe {index} ({size_mib} MiB, {parts} parts) produced "
+                f"{signal}. A patched release answers the same way once the "
+                "probe exceeds memory_limit, and the target advertises no PHP "
+                "version, so exhaustion cannot be told apart from the parser "
+                "crash; confirm the installed release and memory_limit, then rescan"
             )
             return result
 

@@ -12,7 +12,8 @@ Modes:
   oom500    -> probes answer with an empty HTTP 500, the response a patched
                build gives when the probe exceeds memory_limit
 
-The advertised X-Powered-By version defaults to 8.4.27 (patched).
+The advertised X-Powered-By version defaults to 8.4.27 (patched); pass `none`
+to omit the header, which is what a target with expose_php disabled looks like.
 """
 import sys
 import time
@@ -67,7 +68,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Powered-By", "PHP/" + PHP_VERSION)
+        if PHP_VERSION != "none":
+            self.send_header("X-Powered-By", "PHP/" + PHP_VERSION)
         self.end_headers()
         self.wfile.write(body)
 

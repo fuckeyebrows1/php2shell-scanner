@@ -15,6 +15,9 @@ Covers the detection and reporting paths CI must keep working:
   * probe timeout                      -> INCONCLUSIVE, never VULNERABLE
   * patched build + empty HTTP 500     -> FIXED (documented false positive)
   * unpatched build + empty HTTP 500   -> VULNERABLE
+  * patched build + in-band OOM fatal  -> FIXED
+  * no advertised version + OOM signal -> INCONCLUSIVE, never VULNERABLE
+  * patched build + dead FPM worker    -> VULNERABLE (not an OOM response)
 
 Stdlib only. Talks to loopback exclusively.
 """
@@ -123,8 +126,8 @@ def only_result(payload):
 
 
 def test_in_band_fatal(workdir):
-    print("in-band PHP fatal error")
-    with MockTarget("vuln") as mock:
+    print("in-band PHP fatal error on an unpatched build")
+    with MockTarget("vuln", "8.4.26") as mock:
         proc, payload = run_scan(["-u", mock.url], workdir)
     result = only_result(payload)
     check("exit code is 1", proc.returncode == 1, "got %d" % proc.returncode)
@@ -190,7 +193,7 @@ def test_legacy_version(workdir):
 def test_deduplication(workdir):
     print("duplicate host lines scanned once")
     hosts = Path(workdir) / "hosts.txt"
-    with MockTarget("vuln") as mock:
+    with MockTarget("vuln", "8.4.26") as mock:
         hosts.write_text(
             "\n".join([mock.url, mock.url + "/index.php", mock.url]) + "\n",
             encoding="utf-8",
@@ -203,7 +206,7 @@ def test_deduplication(workdir):
 
 def test_custom_path(workdir):
     print("--path is preserved")
-    with MockTarget("vuln") as mock:
+    with MockTarget("vuln", "8.4.26") as mock:
         proc, payload = run_scan(["-u", mock.url, "--path", "/admin.php"], workdir)
     result = only_result(payload)
     request_line = (result["request"] or "").split("\r\n")[0]
@@ -275,6 +278,54 @@ def test_unpatched_empty_500(workdir):
     check("exit code is 1", proc.returncode == 1, "got %d" % proc.returncode)
 
 
+def test_patched_inband_fatal(workdir):
+    print("patched build answers the probe with the in-band OOM fatal")
+    with MockTarget("vuln", "8.4.27") as mock:
+        proc, payload = run_scan(["-u", mock.url], workdir)
+    result = only_result(payload)
+    check("not flagged vulnerable", result["vulnerable"] is False,
+          repr(result["vulnerable"]))
+    check("verdict is FIXED", result["verdict"] == "FIXED", result["verdict"])
+    reason = result["reason"] or ""
+    check(
+        "reason records the overridden fatal",
+        "in-band PHP fatal error" in reason
+        and "but X-Powered-By reports a patched release" in reason,
+        reason,
+    )
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
+
+
+def test_opaque_inband_fatal(workdir):
+    print("in-band OOM fatal with no advertised version")
+    with MockTarget("vuln", "none") as mock:
+        proc, payload = run_scan(["-u", mock.url], workdir)
+    result = only_result(payload)
+    check("vulnerable is unknown, not true", result["vulnerable"] is None,
+          "vulnerable=%r" % (result["vulnerable"],))
+    check("verdict is INCONCLUSIVE", result["verdict"] == "INCONCLUSIVE",
+          result["verdict"])
+    check("reason explains the ambiguity",
+          "advertises no PHP version" in (result["reason"] or ""),
+          result["reason"])
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
+
+
+def test_opaque_empty_500(workdir):
+    print("empty 500 with no advertised version")
+    with MockTarget("oom500", "none") as mock:
+        proc, payload = run_scan(["-u", mock.url], workdir)
+    result = only_result(payload)
+    check("vulnerable is unknown, not true", result["vulnerable"] is None,
+          "vulnerable=%r" % (result["vulnerable"],))
+    check("verdict is INCONCLUSIVE", result["verdict"] == "INCONCLUSIVE",
+          result["verdict"])
+    check("reason explains the ambiguity",
+          "advertises no PHP version" in (result["reason"] or ""),
+          result["reason"])
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
+
+
 def main():
     if not SCANNER.exists():
         raise SystemExit("scanner.py not found at %s" % SCANNER)
@@ -293,6 +344,9 @@ def main():
             test_probe_timeout(workdir)
             test_patched_empty_500(workdir)
             test_unpatched_empty_500(workdir)
+            test_patched_inband_fatal(workdir)
+            test_opaque_inband_fatal(workdir)
+            test_opaque_empty_500(workdir)
         except Exception as exc:  # report harness failures as failures, not crashes
             print("  FAIL harness error: %r" % (exc,))
             FAILURES.append("harness")

@@ -6,9 +6,13 @@ A command-line tool for detecting CVE-2026-109618 and CVE-2026-109619 in PHP app
 
 The scanner sends a minimal multipart control request followed by up to three crafted multipart probes. The probes use PHP array keys nested 62 levels deep and increase from 1 MiB to 20 MiB, matching the detection logic used by Assetnote's internal scanner.
 
-A target is reported vulnerable when the probe produces a PHP memory-exhaustion error, a differential empty HTTP 500, a PHP-FPM worker failure, or an advertised PHP version known to be unpatched. Initial 5xx responses, common request-rejection statuses, and nonempty HTTP 500 responses without the PHP fatal-error signature are not treated as crash signals.
+A probe response is classified by what it proves:
 
-A differential empty HTTP 500 is only treated as a crash signal when the target does not advertise a patched release. A patched build answers a probe that exceeds its `memory_limit` with the same response, so that one ambiguous case is resolved in favour of the advertised version.
+- A **PHP-FPM worker that dies mid-request** (an FPM 502, 503 or 504, or an empty HTTP 200) is reported vulnerable whatever version is advertised. Memory exhaustion is a fatal error PHP reports and the worker survives it, so a worker that disappears under this probe is the parser corrupting memory.
+- A **memory-exhaustion response** — the in-band `Allowed memory size … exhausted … in Unknown` fatal, or a differential empty HTTP 500 — is ambiguous, because a patched build answers a probe past its `memory_limit` with exactly the same thing. The advertised release decides: patched means `FIXED`, unpatched means `VULNERABLE`, and no advertised release means `INCONCLUSIVE`.
+- An **advertised release known to be unpatched** is reported vulnerable even when no probe crashed.
+
+Initial 5xx responses, common request-rejection statuses, and nonempty HTTP 500 responses without the PHP fatal-error signature are not treated as crash signals.
 
 The scanner tests `/index.php` by default. A path supplied in the URL is preserved, and `--path` or `--path-file` can test custom paths. phpMyAdmin targets are automatically retested at `/show_config_errors.php`. Redirects are not followed unless `--follow-redirects` is set.
 
@@ -126,6 +130,8 @@ Results are printed to the terminal. When using `-o`, vulnerable hosts are saved
 
 On specific PHP configurations, a multipart probe that exceeds PHP's `memory_limit` makes a patched build answer with the same empty HTTP 500 a vulnerable one does. This was reproduced on patched PHP 8.4.27 with `memory_limit` values from **2M to 32M**, and on PHP 8.3.36 at **128M** when `max_multipart_body_parts` is set to **2785 or higher**. The exact threshold may vary between builds.
 
-Because that response is ambiguous, an empty HTTP 500 is not counted as a crash signal when the target advertises a patched release: the target is reported `FIXED` and the overridden signal is recorded in the reason. In-band PHP fatal errors and FPM worker failures still count, since they are direct evidence of the vulnerable parser rather than a bodyless 500.
+With `display_errors` on, the same patched build serves the in-band `Allowed memory size … exhausted … in Unknown` text instead of an empty body, so that signal is equally ambiguous.
 
-When PHP does not disclose its version, the scanner cannot distinguish this safe post-patch OOM from the vulnerable pre-patch behavior. Results should therefore be verified against the installed PHP version and any vendor backports.
+Both memory-exhaustion signals are therefore settled by the advertised release: a patched release reports `FIXED` and records the overridden signal in the reason. FPM worker failures still count on their own, because memory exhaustion never destroys a worker.
+
+When PHP does not disclose its version — `expose_php` off, which is common in production — memory-exhaustion evidence cannot be resolved from the outside: the response is identical whether the build is patched and defending at `memory_limit` or unpatched and corrupting the parser. The scanner reports `INCONCLUSIVE` rather than guessing, and the reason records the signal. Confirm the installed release and its `memory_limit` before treating such a target as vulnerable. Worker-death signals are unaffected: they still report vulnerable without an advertised version.
