@@ -107,6 +107,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # Pulled quietly and up front: the pull progress of a fresh image is
+      # hundreds of lines, and it would push the scan output out of a readable
+      # log window.
+      - name: Pull the test images
+        run: |
+          for image in php:8.4.26-apache php:8.4.26-fpm php:8.4.27-apache nginx:alpine; do
+            docker pull --quiet "$image"
+          done
+
       # The release the fixed-version table calls unpatched, at PHP's default
       # memory_limit. --expect-vulnerable asserts the verdict comes from a probe
       # crashing the request handler, not from the advertised version alone, so
@@ -167,9 +176,19 @@ jobs:
           exit 1
 
       - name: Scan the unpatched PHP-FPM target
-        run: >-
-          python tests/real_php_check.py http://127.0.0.1:18094/index.php
-          --expect-worker-death
+        run: |
+          set +e
+          python tests/real_php_check.py http://127.0.0.1:18094/index.php \
+            --expect-worker-death | tee "$RUNNER_TEMP/fpm-scan.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            # The job log is long; repeat just what failed as annotations so the
+            # verdict is readable from the checks summary.
+            grep -E '^(  FAIL|reason:)' "$RUNNER_TEMP/fpm-scan.log" \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
 
       # Pinned to the release the README names as patched, and mounted with an
       # explicit ini so expose_php and memory_limit do not depend on the image.
