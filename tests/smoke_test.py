@@ -4,7 +4,8 @@
 Covers the detection and reporting paths CI must keep working:
 
   * in-band PHP fatal error            -> VULNERABLE
-  * PHP-FPM worker death (HTTP 502)    -> VULNERABLE
+  * worker death (HTTP 502), no release -> VULNERABLE
+  * worker death on a patched release   -> FIXED (cap death overridden)
   * --sapi mod_php ignores the FPM-only signal
   * clean target on a patched version  -> not vulnerable (FIXED)
   * clean target on a legacy branch    -> VULNERABLE by advertised version
@@ -146,14 +147,32 @@ def test_in_band_fatal(workdir):
 
 
 def test_fpm_worker_death(workdir):
-    print("PHP-FPM worker death")
-    with MockTarget("fpm") as mock:
+    print("PHP-FPM worker death with no advertised release")
+    with MockTarget("fpm", "none") as mock:
         proc, payload = run_scan(["-u", mock.url], workdir)
     result = only_result(payload)
     check("exit code is 1", proc.returncode == 1, "got %d" % proc.returncode)
     check("verdict is VULNERABLE", result["verdict"] == "VULNERABLE", result["verdict"])
     check("SAPI is PHP-FPM", result["sapi"] == "PHP-FPM", str(result["sapi"]))
     check("reason names HTTP 502", "502" in result["reason"], result["reason"])
+
+
+def test_patched_fpm_worker_death(workdir):
+    print("PHP-FPM worker death on a patched build")
+    with MockTarget("fpm", "8.4.27") as mock:
+        proc, payload = run_scan(["-u", mock.url], workdir)
+    result = only_result(payload)
+    check("not flagged vulnerable", result["vulnerable"] is False,
+          repr(result["vulnerable"]))
+    check("verdict is FIXED", result["verdict"] == "FIXED", result["verdict"])
+    reason = result["reason"] or ""
+    check("reason records the worker death", "killed the PHP worker" in reason, reason)
+    check(
+        "reason records the patched release override",
+        "but X-Powered-By reports a patched release" in reason,
+        reason,
+    )
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
 
 
 def test_sapi_filter(workdir):
@@ -335,6 +354,7 @@ def main():
         try:
             test_in_band_fatal(workdir)
             test_fpm_worker_death(workdir)
+            test_patched_fpm_worker_death(workdir)
             test_sapi_filter(workdir)
             test_patched_version(workdir)
             test_legacy_version(workdir)

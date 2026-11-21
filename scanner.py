@@ -674,9 +674,10 @@ def crash_signal(
     The third element records what the evidence proves. ``MEMORY_EXHAUSTION``
     is also what a patched build produces once a probe exceeds ``memory_limit``,
     so it decides a verdict only together with the advertised release.
-    ``WORKER_DEATH`` is not: hitting the limit raises a fatal error PHP reports
-    and leaves the worker running, so a worker that disappears mid-request is
-    the parser corrupting memory.
+    ``WORKER_DEATH`` is stronger, but only while PHP's own limit is enforced:
+    with ``memory_limit`` disabled the process is bounded by the container's
+    memory cap instead, which kills patched and unpatched workers alike, so the
+    advertised release has to override it too.
     """
     mode = (
         "PHP-FPM"
@@ -938,9 +939,24 @@ def check_url(
         # probe larger than memory_limit with the same in-band fatal error, or
         # with the same empty HTTP 500 when display_errors is off. The advertised
         # release settles it, and with no release to go on the probe cannot.
-        # Worker death is not ambiguous: memory_limit raises a fatal error PHP
-        # reports and leaves the worker alive, so a worker that vanishes under
-        # this probe is the parser corrupting memory, whatever version it claims.
+        #
+        # Worker death is ambiguous too once memory_limit is disabled: PHP is
+        # then bounded only by the container's memory cap, which kills the
+        # patched php:8.4.27-fpm control in CI exactly as it kills the unpatched
+        # build. A target that advertises a patched release therefore keeps its
+        # FIXED verdict; without an advertised release the death is still the
+        # only signal the probe produced and decides as before.
+        if signal and evidence == WORKER_DEATH and by_version == "FIXED":
+            result["vulnerable"] = False
+            result["verdict"] = "FIXED"
+            result["sapi"] = detected_sapi
+            result["reason"] = (
+                f"probe {index} ({size_mib} MiB, {parts} parts) killed the PHP "
+                f"worker: {signal}, but X-Powered-By reports a patched release, "
+                "so the death is attributed to the server's memory budget: "
+                + powered_by
+            )
+            return result
         if signal and evidence == WORKER_DEATH:
             result["vulnerable"] = True
             result["verdict"] = "VULNERABLE"

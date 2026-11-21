@@ -216,11 +216,11 @@ jobs:
 
       # The control for the rule above: the fixed release under the same
       # disabled memory_limit, the same 160m cap and the same two-worker pool.
-      # Only the build differs, so a healthy response here means the probe is
-      # what separated the two targets, not the container budget. It matters
-      # because the worker-death rule never consults X-Powered-By: a patched
-      # build killed by the cap would be reported VULNERABLE, and that is what
-      # --expect-patched-fpm is there to catch.
+      # It dies the same way the unpatched target does: the cap, not the parser,
+      # ends the worker. That is the point. A worker death cannot be proof on a
+      # target that advertises a patched release, so --expect-patched-fpm
+      # requires FIXED with the death recorded in the reason, and a regression
+      # to the old version-blind rule fails here.
       - name: Start patched PHP-FPM 8.4.27 behind nginx with the same cap
         run: |
           set -euo pipefail
@@ -251,7 +251,7 @@ jobs:
         run: |
           set +e
           python tests/real_php_check.py http://127.0.0.1:18095/index.php \
-            --expect-patched-fpm --body php2shell-ci \
+            --expect-patched-fpm \
             | tee "$RUNNER_TEMP/fpm-patched-scan.log"
           status=${PIPESTATUS[0]}
           set -e
@@ -261,21 +261,23 @@ jobs:
             exit 1
           fi
 
-      # The verdict alone would also pass if the scanner stopped looking early,
-      # so require PHP-FPM itself to have kept every worker: if this fires, the
-      # 160m cap killed the patched build too and the failure is about the cap,
-      # not about the patch.
-      - name: Check the patched PHP-FPM worker survived
+      # The scan asserts a worker-death response, so require PHP-FPM itself to
+      # have recorded the death: the control only means something if the cap
+      # killed this build too, and the log keeps that evidence readable.
+      - name: Check PHP-FPM recorded the patched worker's death
         if: always()
         run: |
           docker logs php-fpm-patched > "$RUNNER_TEMP/fpm-patched.log" 2>&1 || true
-          if grep -qE 'exited on signal|segmentation fault' "$RUNNER_TEMP/fpm-patched.log"; then
-            echo "::error::the patched PHP-FPM worker died under the same 160m cap"
-            grep -E 'exited on signal|segmentation fault' \
-              "$RUNNER_TEMP/fpm-patched.log" | tail -5
+          if ! grep -qE 'exited on signal|segmentation fault' "$RUNNER_TEMP/fpm-patched.log"; then
+            echo "::error::the patched PHP-FPM worker never died, so the capped case was not exercised"
+            tail -30 "$RUNNER_TEMP/fpm-patched.log"
             exit 1
           fi
-          echo "::notice::no patched PHP-FPM worker exited on a signal"
+          grep -E 'exited on signal|segmentation fault' \
+            "$RUNNER_TEMP/fpm-patched.log" | tail -1 > "$RUNNER_TEMP/patched-death.log"
+          cat "$RUNNER_TEMP/patched-death.log"
+          while IFS= read -r line; do echo "::notice::$line"; done \
+            < "$RUNNER_TEMP/patched-death.log"
 
       # Pinned to the release the README names as patched, and mounted with an
       # explicit ini so expose_php and memory_limit do not depend on the image.

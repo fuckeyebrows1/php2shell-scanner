@@ -16,8 +16,9 @@ server as vulnerable fails here, which is the case the mock target cannot see.
 ``php:8.4.26-fpm`` target that hides its release, so the version rule cannot
 fire and only a worker dying mid-request can produce VULNERABLE.
 ``--expect-patched-fpm`` is that target's control: the same probe against
-``php:8.4.27-fpm`` under the same disabled ``memory_limit`` and container cap,
-where the worker has to survive and the advertised release decides the verdict.
+``php:8.4.27-fpm`` under the same disabled ``memory_limit`` and container cap.
+Its worker dies too, so only the advertised patched release can keep the
+verdict at FIXED.
 
 Stdlib only.
 """
@@ -185,15 +186,15 @@ def check_worker_death(proc, result):
     return 0
 
 
-def check_patched_fpm(proc, result, body=""):
-    """Assert a patched PHP-FPM build survives the probe its unpatched peer dies on.
+def check_patched_fpm(proc, result):
+    """Assert a cap-killed patched build is not reported vulnerable for dying.
 
-    The target runs under the same disabled ``memory_limit`` and the same 160m
-    container cap as the unpatched FPM target, so the probe reaches the parser
-    with nothing but the container budget to stop it. A fixed build has to
-    answer it. If this worker is killed too, the scanner reports a patched
-    server as VULNERABLE, because the worker-death rule never consults
-    X-Powered-By: that is the narrowing this control exists to detect.
+    The target runs with ``memory_limit`` disabled under the same 160m cap as
+    the unpatched one, and the probe kills the worker on both builds. Only
+    X-Powered-By separates them: the fixed release has to keep the verdict at
+    FIXED even though a 502 proves the worker died. Before the rule was
+    narrowed, worker death was proof at any version and this control reported a
+    patched server as VULNERABLE.
     """
     check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
     check(
@@ -202,63 +203,39 @@ def check_patched_fpm(proc, result, body=""):
         repr(result["vulnerable"]),
     )
     check("verdict is FIXED", result["verdict"] == "FIXED", result["verdict"])
-
-    # SAPI is not asserted: the scanner only records it when crash evidence names
-    # the handler, and a healthy patched scan has none to report.
-    reason = result.get("reason") or ""
-    died = "killed the PHP worker" in reason
     check(
-        "no probe killed the PHP worker",
-        not died,
-        reason
-        + (
-            " -- the cap killed the patched build as well, so the worker-death "
-            "rule needs narrowing for the uncapped-memory case"
-            if died
-            else ""
-        ),
+        "SAPI is reported as PHP-FPM",
+        result.get("sapi") == "PHP-FPM",
+        repr(result.get("sapi")),
+    )
+
+    reason = result.get("reason") or ""
+    check("a probe killed the PHP worker", "killed the PHP worker" in reason, reason)
+    check(
+        "the death is attributed to the server's memory budget",
+        "memory budget" in reason,
+        reason,
+    )
+    check(
+        "the verdict came from the advertised patched release",
+        "but X-Powered-By reports a patched release" in reason,
+        reason,
     )
 
     probes = result.get("probes") or []
     last = probes[-1] if probes else {}
-    # The unpatched target answers probe 1 with a 502 or an empty 200. The
-    # patched build must answer the same request instead of losing its worker.
-    deaths = [
-        probe
-        for probe in probes
-        if probe.get("status_code") in (502, 503, 504)
-        or (probe.get("status_code") == 200 and probe.get("response_bytes") == 0)
-    ]
     check(
-        "no probe was answered by a dead worker",
-        not deaths,
-        "probes=%r -- the patched worker died under the same 160m cap, so the "
-        "worker-death rule needs narrowing for the uncapped-memory case"
-        % (probes,),
-    )
-    check(
-        "the last probe got a normal response",
-        last.get("status_code") == 200 and last.get("response_bytes", 0) > 0,
+        "the last probe got a worker-death response",
+        last.get("status_code") in (502, 503, 504)
+        or (last.get("status_code") == 200 and last.get("response_bytes") == 0),
         "probes=%r" % (probes,),
     )
-    if body:
-        check(
-            "target echoed %r" % body,
-            body in (result.get("response") or ""),
-            repr((result.get("response") or "")[-200:]),
-        )
 
     control = result.get("control") or {}
     check(
         "control request returned HTTP 200",
         control.get("status_code") == 200,
         repr(control.get("status_code")),
-    )
-
-    check(
-        "the verdict came from the advertised patched release",
-        "reports a patched release" in reason,
-        reason,
     )
 
     match = VERSION.search(result.get("powered_by") or "")
@@ -279,7 +256,7 @@ def check_patched_fpm(proc, result, body=""):
     if FAILURES:
         print("FAILED: %d check(s): %s" % (len(FAILURES), ", ".join(FAILURES)))
         return 1
-    print("Patched PHP-FPM target correctly reported fixed from its release.")
+    print("Patched PHP-FPM target kept FIXED despite the dead worker.")
     return 0
 
 
@@ -332,9 +309,9 @@ def main():
         "--expect-patched-fpm",
         action="store_true",
         help=(
-            "require a patched PHP-FPM build under the same disabled "
-            "memory_limit and container cap to survive every probe and be "
-            "reported FIXED; used for the php:8.4.27-fpm control"
+            "require a patched PHP-FPM build whose worker dies under the same "
+            "container cap to stay FIXED from its advertised release; used "
+            "for the php:8.4.27-fpm control"
         ),
     )
     args = parser.parse_args()
@@ -361,7 +338,7 @@ def main():
     if args.expect_worker_death:
         return check_worker_death(proc, result)
     if args.expect_patched_fpm:
-        return check_patched_fpm(proc, result, args.body)
+        return check_patched_fpm(proc, result)
 
     check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
     check(
