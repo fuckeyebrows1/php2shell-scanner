@@ -112,7 +112,7 @@ jobs:
       # log window.
       - name: Pull the test images
         run: |
-          for image in php:8.4.26-apache php:8.4.26-fpm php:8.4.27-apache nginx:alpine; do
+          for image in php:8.4.26-apache php:8.4.26-fpm php:8.4.27-apache php:8.4.27-fpm nginx:alpine; do
             docker pull --quiet "$image"
           done
 
@@ -214,6 +214,69 @@ jobs:
           while IFS= read -r line; do echo "::notice::$line"; done \
             < "$RUNNER_TEMP/death.log"
 
+      # The control for the rule above: the fixed release under the same
+      # disabled memory_limit, the same 160m cap and the same two-worker pool.
+      # Only the build differs, so a healthy response here means the probe is
+      # what separated the two targets, not the container budget. It matters
+      # because the worker-death rule never consults X-Powered-By: a patched
+      # build killed by the cap would be reported VULNERABLE, and that is what
+      # --expect-patched-fpm is there to catch.
+      - name: Start patched PHP-FPM 8.4.27 behind nginx with the same cap
+        run: |
+          set -euo pipefail
+          docker run --detach --name php-fpm-patched --network php2shell-ci \
+            --memory 160m --memory-swap 160m \
+            --volume "$PWD/tests/real_php/index.php:/var/www/html/index.php:ro" \
+            --volume "$PWD/tests/real_php/patched_fpm.ini:/usr/local/etc/php/conf.d/zz-ci.ini:ro" \
+            --volume "$PWD/tests/real_php/fpm-pool.conf:/usr/local/etc/php-fpm.d/zz-ci.conf:ro" \
+            php:8.4.27-fpm
+
+          docker run --detach --name nginx-patched --network php2shell-ci \
+            --publish 18095:80 \
+            --volume "$PWD/tests/real_php/nginx-patched.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:alpine
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18095/index.php; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "patched PHP-FPM target never became ready"
+          docker logs php-fpm-patched
+          docker logs nginx-patched
+          exit 1
+
+      - name: Scan the patched PHP-FPM target
+        run: |
+          set +e
+          python tests/real_php_check.py http://127.0.0.1:18095/index.php \
+            --expect-patched-fpm --body php2shell-ci \
+            | tee "$RUNNER_TEMP/fpm-patched-scan.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            grep -E '^(  FAIL|reason:)' "$RUNNER_TEMP/fpm-patched-scan.log" \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
+
+      # The verdict alone would also pass if the scanner stopped looking early,
+      # so require PHP-FPM itself to have kept every worker: if this fires, the
+      # 160m cap killed the patched build too and the failure is about the cap,
+      # not about the patch.
+      - name: Check the patched PHP-FPM worker survived
+        if: always()
+        run: |
+          docker logs php-fpm-patched > "$RUNNER_TEMP/fpm-patched.log" 2>&1 || true
+          if grep -qE 'exited on signal|segmentation fault' "$RUNNER_TEMP/fpm-patched.log"; then
+            echo "::error::the patched PHP-FPM worker died under the same 160m cap"
+            grep -E 'exited on signal|segmentation fault' \
+              "$RUNNER_TEMP/fpm-patched.log" | tail -5
+            exit 1
+          fi
+          echo "::notice::no patched PHP-FPM worker exited on a signal"
+
       # Pinned to the release the README names as patched, and mounted with an
       # explicit ini so expose_php and memory_limit do not depend on the image.
       - name: Start patched PHP 8.4.27
@@ -297,11 +360,17 @@ jobs:
           docker logs php-unpatched || true
           docker logs nginx-unpatched || true
           docker logs php-fpm-unpatched || true
+          docker logs nginx-patched || true
+          docker logs php-fpm-patched || true
           echo "--- unpatched worker exits ---"
           docker logs php-unpatched 2>&1 \
             | grep -iE 'segmentation|child pid|signal|memory' | tail -20 || true
           echo "--- unpatched PHP-FPM worker exits ---"
           docker logs php-fpm-unpatched 2>&1 \
+            | grep -iE 'segmentation|exited on signal|child pid|memory' | tail -20 \
+            || true
+          echo "--- patched PHP-FPM worker exits ---"
+          docker logs php-fpm-patched 2>&1 \
             | grep -iE 'segmentation|exited on signal|child pid|memory' | tail -20 \
             || true
 
@@ -314,4 +383,6 @@ jobs:
           docker rm --force php-unpatched || true
           docker rm --force nginx-unpatched || true
           docker rm --force php-fpm-unpatched || true
+          docker rm --force nginx-patched || true
+          docker rm --force php-fpm-patched || true
           docker network rm php2shell-ci || true

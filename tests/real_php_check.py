@@ -15,6 +15,9 @@ server as vulnerable fails here, which is the case the mock target cannot see.
 ``--expect-worker-death`` is the mirror image: it scans an unpatched
 ``php:8.4.26-fpm`` target that hides its release, so the version rule cannot
 fire and only a worker dying mid-request can produce VULNERABLE.
+``--expect-patched-fpm`` is that target's control: the same probe against
+``php:8.4.27-fpm`` under the same disabled ``memory_limit`` and container cap,
+where the worker has to survive and the advertised release decides the verdict.
 
 Stdlib only.
 """
@@ -182,6 +185,104 @@ def check_worker_death(proc, result):
     return 0
 
 
+def check_patched_fpm(proc, result, body=""):
+    """Assert a patched PHP-FPM build survives the probe its unpatched peer dies on.
+
+    The target runs under the same disabled ``memory_limit`` and the same 160m
+    container cap as the unpatched FPM target, so the probe reaches the parser
+    with nothing but the container budget to stop it. A fixed build has to
+    answer it. If this worker is killed too, the scanner reports a patched
+    server as VULNERABLE, because the worker-death rule never consults
+    X-Powered-By: that is the narrowing this control exists to detect.
+    """
+    check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
+    check(
+        "target is not vulnerable",
+        result["vulnerable"] is False,
+        repr(result["vulnerable"]),
+    )
+    check("verdict is FIXED", result["verdict"] == "FIXED", result["verdict"])
+
+    # SAPI is not asserted: the scanner only records it when crash evidence names
+    # the handler, and a healthy patched scan has none to report.
+    reason = result.get("reason") or ""
+    died = "killed the PHP worker" in reason
+    check(
+        "no probe killed the PHP worker",
+        not died,
+        reason
+        + (
+            " -- the cap killed the patched build as well, so the worker-death "
+            "rule needs narrowing for the uncapped-memory case"
+            if died
+            else ""
+        ),
+    )
+
+    probes = result.get("probes") or []
+    last = probes[-1] if probes else {}
+    # The unpatched target answers probe 1 with a 502 or an empty 200. The
+    # patched build must answer the same request instead of losing its worker.
+    deaths = [
+        probe
+        for probe in probes
+        if probe.get("status_code") in (502, 503, 504)
+        or (probe.get("status_code") == 200 and probe.get("response_bytes") == 0)
+    ]
+    check(
+        "no probe was answered by a dead worker",
+        not deaths,
+        "probes=%r -- the patched worker died under the same 160m cap, so the "
+        "worker-death rule needs narrowing for the uncapped-memory case"
+        % (probes,),
+    )
+    check(
+        "the last probe got a normal response",
+        last.get("status_code") == 200 and last.get("response_bytes", 0) > 0,
+        "probes=%r" % (probes,),
+    )
+    if body:
+        check(
+            "target echoed %r" % body,
+            body in (result.get("response") or ""),
+            repr((result.get("response") or "")[-200:]),
+        )
+
+    control = result.get("control") or {}
+    check(
+        "control request returned HTTP 200",
+        control.get("status_code") == 200,
+        repr(control.get("status_code")),
+    )
+
+    check(
+        "the verdict came from the advertised patched release",
+        "reports a patched release" in reason,
+        reason,
+    )
+
+    match = VERSION.search(result.get("powered_by") or "")
+    if not match:
+        check("server advertises its PHP release", False, repr(result.get("powered_by")))
+    else:
+        version = tuple(int(part) for part in match.groups())
+        fixed = PATCHED_RELEASES.get(version[:2])
+        check(
+            "advertised release is patched",
+            fixed is not None and version[2] >= fixed,
+            "%d.%d.%d is below the fixed release; update the image pin"
+            % version,
+        )
+
+    print("")
+    print("reason: %s" % result.get("reason"))
+    if FAILURES:
+        print("FAILED: %d check(s): %s" % (len(FAILURES), ", ".join(FAILURES)))
+        return 1
+    print("Patched PHP-FPM target correctly reported fixed from its release.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", help="URL of the real PHP target")
@@ -227,13 +328,23 @@ def main():
             "php:8.4.26-fpm target behind nginx"
         ),
     )
+    parser.add_argument(
+        "--expect-patched-fpm",
+        action="store_true",
+        help=(
+            "require a patched PHP-FPM build under the same disabled "
+            "memory_limit and container cap to survive every probe and be "
+            "reported FIXED; used for the php:8.4.27-fpm control"
+        ),
+    )
     args = parser.parse_args()
 
     if not SCANNER.exists():
         raise SystemExit("scanner.py not found at %s" % SCANNER)
 
     print("scanning real target: %s" % args.url)
-    proc, payload = scan(args.url, "fpm" if args.expect_worker_death else "auto")
+    runs_fpm = args.expect_worker_death or args.expect_patched_fpm
+    proc, payload = scan(args.url, "fpm" if runs_fpm else "auto")
     if payload is None:
         print(proc.stdout)
         print(proc.stderr)
@@ -249,6 +360,8 @@ def main():
         return check_unpatched(proc, result)
     if args.expect_worker_death:
         return check_worker_death(proc, result)
+    if args.expect_patched_fpm:
+        return check_patched_fpm(proc, result, args.body)
 
     check("exit code is 0", proc.returncode == 0, "got %d" % proc.returncode)
     check(
